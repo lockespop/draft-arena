@@ -2,7 +2,7 @@
 // (the server owns the canonical copy and broadcasts it after each change).
 
 import type {
-  Drafter, FreeformReveal, Player, Position, RoomState,
+  Drafter, FreeformPick, FreeformReveal, Player, Position, RoomState,
 } from '../shared/types';
 import { SLOTS, SNAKE_ROUNDS, MAX_FREEFORM_ROUNDS } from '../shared/types';
 import type { Rng } from './rng';
@@ -122,58 +122,90 @@ export function activeDrafters(state: RoomState): Drafter[] {
   return state.drafters.filter((d) => !rosterFull(d));
 }
 
-/** Submit a hidden pick for the current free-form round. */
-export function doFreeformSubmit(
+/** Submit a hidden lineup for the current free-form round: one pick per empty
+ * roster slot. Returns null on success, or an error message. */
+export function doFreeformLineupSubmit(
   state: RoomState,
   drafterId: string,
-  playerId: string,
+  picks: FreeformPick[],
   byId: Map<string, Player>,
 ): string | null {
   const d = drafterById(state, drafterId);
   if (!d) return 'Drafter not found.';
   if (state.phase !== 'draft' || state.mode !== 'freeform') return 'Draft is not running.';
   if (rosterFull(d)) return 'Your roster is full.';
-  if (!state.pool.includes(playerId)) return 'Player is not available.';
-  if (!byId.has(playerId)) return 'Unknown player.';
-  state.submissions[drafterId] = playerId;
+  const emptyCount = d.roster.filter((s) => s === null).length;
+  if (!Array.isArray(picks) || picks.length !== emptyCount) {
+    return `Submit one pick per empty slot (${emptyCount}).`;
+  }
+  const seenSlots = new Set<number>();
+  const seenPlayers = new Set<string>();
+  for (const pick of picks) {
+    if (!pick || !Number.isInteger(pick.slot) || pick.slot < 0 || pick.slot >= SLOTS.length) {
+      return 'Invalid slot.';
+    }
+    if (d.roster[pick.slot] !== null) return 'That slot is already filled.';
+    if (seenSlots.has(pick.slot)) return 'Two picks for the same slot.';
+    seenSlots.add(pick.slot);
+    if (seenPlayers.has(pick.playerId)) return 'Two slots picked the same player.';
+    seenPlayers.add(pick.playerId);
+    if (!state.pool.includes(pick.playerId)) return 'Player is not available.';
+    const player = byId.get(pick.playerId);
+    if (!player) return 'Unknown player.';
+    const pos = SLOTS[pick.slot];
+    if (player.pos !== pos && player.pos2 !== pos) {
+      return `${player.name} can't play ${pos}.`;
+    }
+  }
+  state.submissions[drafterId] = picks;
   return null;
 }
 
 export function freeformAllSubmitted(state: RoomState): boolean {
-  return activeDrafters(state).every((d) => state.submissions[d.id] !== undefined);
+  return activeDrafters(state).every((d) => {
+    const sub = state.submissions[d.id];
+    return Array.isArray(sub) && sub.length > 0;
+  });
 }
 
 /**
- * Reveal a free-form round: unique picks lock in, contested picks (2+ drafters)
- * are eliminated from the pool. Returns the reveal summary.
+ * Reveal a free-form round: players picked by exactly one drafter lock into
+ * that drafter's roster at their chosen slot; players picked by 2+ drafters
+ * are eliminated from the pool entirely. Returns the reveal summary.
  */
-export function resolveFreeformRound(state: RoomState, byId: Map<string, Player>): FreeformReveal {
-  const counts = new Map<string, string[]>();
-  for (const [drafterId, playerId] of Object.entries(state.submissions)) {
+export function resolveFreeformRound(state: RoomState): FreeformReveal {
+  // Count picks per player across the round (only drafters still building).
+  const pickedBy = new Map<string, string[]>();
+  const pickSlot = new Map<string, Map<string, number>>(); // playerId -> drafterId -> slot
+  for (const [drafterId, picks] of Object.entries(state.submissions)) {
     const d = drafterById(state, drafterId);
-    if (!d || rosterFull(d)) continue;
-    if (!counts.has(playerId)) counts.set(playerId, []);
-    counts.get(playerId)!.push(drafterId);
+    if (!d || rosterFull(d) || !Array.isArray(picks)) continue;
+    for (const pick of picks) {
+      if (!pickedBy.has(pick.playerId)) {
+        pickedBy.set(pick.playerId, []);
+        pickSlot.set(pick.playerId, new Map());
+      }
+      pickedBy.get(pick.playerId)!.push(drafterId);
+      pickSlot.get(pick.playerId)!.set(drafterId, pick.slot);
+    }
   }
 
   const reveal: FreeformReveal = { round: state.round, assignments: [], eliminations: [] };
 
-  for (const [playerId, drafters] of counts) {
-    const player = byId.get(playerId);
-    if (!player) continue;
-    if (drafters.length >= 2) {
-      // Contested: eliminated, nobody gets them.
+  for (const [playerId, drafterIds] of pickedBy) {
+    if (drafterIds.length >= 2) {
+      // Contested: eliminated from the pool entirely, nobody gets them.
       reveal.eliminations.push(playerId);
       state.pool = state.pool.filter((id) => id !== playerId);
-    } else {
-      const d = drafterById(state, drafters[0])!;
-      const slot = slotForPlayer(player, d.roster);
-      if (slot >= 0) {
-        d.roster[slot] = playerId;
-        state.pool = state.pool.filter((id) => id !== playerId);
-        reveal.assignments.push({ drafterId: d.id, playerId, slot });
-      }
+      continue;
     }
+    const drafterId = drafterIds[0];
+    const d = drafterById(state, drafterId);
+    const slot = pickSlot.get(playerId)!.get(drafterId)!;
+    if (!d || d.roster[slot] !== null) continue; // defensive; shouldn't happen
+    d.roster[slot] = playerId;
+    state.pool = state.pool.filter((id) => id !== playerId);
+    reveal.assignments.push({ drafterId, playerId, slot });
   }
 
   state.lastReveal = reveal;
@@ -219,12 +251,32 @@ export function freeformSafetyFill(state: RoomState, byId: Map<string, Player>):
   finishIfDone(state);
 }
 
-export function freeformNeedsSafetyFill(state: RoomState): boolean {
+export function freeformNeedsSafetyFill(
+  state: RoomState,
+  byId: Map<string, Player>,
+): boolean {
   if (state.mode !== 'freeform' || state.phase !== 'draft') return false;
   if (state.round > MAX_FREEFORM_ROUNDS) return true;
-  const needed = activeDrafters(state).reduce(
+  const active = activeDrafters(state);
+  const needed = active.reduce(
     (n, d) => n + d.roster.filter((s) => s === null).length,
     0,
   );
-  return state.pool.length < needed;
+  if (state.pool.length < needed) return true;
+  // Position deadlock: an empty slot with no fitting player left in the pool
+  // (e.g. every remaining PG was eliminated) can never be filled by a lineup.
+  const poolPlayers: Player[] = [];
+  for (const id of state.pool) {
+    const p = byId.get(id);
+    if (p) poolPlayers.push(p);
+  }
+  for (const d of active) {
+    for (let i = 0; i < SLOTS.length; i++) {
+      if (d.roster[i] !== null) continue;
+      const pos = SLOTS[i];
+      const fits = poolPlayers.some((p) => p.pos === pos || p.pos2 === pos);
+      if (!fits) return true;
+    }
+  }
+  return false;
 }

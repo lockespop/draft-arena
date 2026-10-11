@@ -4,8 +4,14 @@
 //       (2) npx tsx scripts/smoke.ts
 
 import { WebSocket } from 'ws';
+import playersData from '../src/data/players.json';
 
 const URL = 'ws://localhost:3001';
+
+const SLOTS = ['PG', 'SG', 'SF', 'PF', 'C'] as const;
+const BY_ID = new Map<string, { pos: string; pos2: string | null }>(
+  (playersData as any[]).map((p) => [p.id, { pos: p.pos, pos2: p.pos2 }]),
+);
 
 interface Msg {
   t: string;
@@ -60,7 +66,23 @@ function playGame(mode: 'snake' | 'freeform', botCount: number): Promise<void> {
           const me = s.drafters.find((d: any) => d.id === youId);
           const needPick = me && me.roster.some((x: any) => x === null);
           if (needPick && !s.submissions[youId!] && s.pool.length > 0) {
-            ws.send(JSON.stringify({ t: 'submit', playerId: s.pool[0] }));
+            // Human submits a full lineup: one slot-fitting pick per empty slot.
+            const picks: { slot: number; playerId: string }[] = [];
+            const used = new Set<string>();
+            me.roster.forEach((v: any, i: number) => {
+              if (v !== null) return;
+              const pos = SLOTS[i];
+              const pid = (s.pool as string[]).find((id: string) => {
+                if (used.has(id)) return false;
+                const p = BY_ID.get(id);
+                return !!p && (p.pos === pos || p.pos2 === pos);
+              });
+              if (pid) {
+                used.add(pid);
+                picks.push({ slot: i, playerId: pid });
+              }
+            });
+            if (picks.length > 0) ws.send(JSON.stringify({ t: 'submit', picks }));
           }
           if (s.round !== lastRound) {
             lastRound = s.round;

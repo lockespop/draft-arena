@@ -7,10 +7,13 @@ Two modes:
 
 - **🐍 Snake Draft** — classic turn-based drafting, 5 rounds, PG/SG/SF/PF/C slots,
   60-second pick timer with auto-pick on timeout.
-- **⚡ Free-for-All** — every round all drafters submit a secret pick simultaneously.
-  Pick a player nobody else picked and he's yours. If 2+ drafters pick the same
-  player, he's **eliminated** — nobody gets him. Rounds continue until every roster
-  has a full starting five.
+- **⚡ Free-for-All** — every round, each drafter still building secretly submits a
+  full lineup: one player per open roster slot (up to 5 in round 1), each pick
+  assigned to its position. At the reveal, any player picked by 2+ drafters is
+  **eliminated** from the pool entirely — nobody gets them. Players picked by
+  exactly one drafter **lock in** at their position and come off the board.
+  Drafters with a full starting five sit out; rounds continue until every team
+  is full. Land 5 unique picks in round 1 and you're done immediately.
 
 Any mix of humans and computer opponents (5 bot personalities: Best Available,
 Positional Needs, Defense First, Star Chaser, Contrarian). Solo vs bots works.

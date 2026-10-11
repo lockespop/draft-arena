@@ -2,7 +2,7 @@
 // differently and picks with weighted randomness, so games feel different
 // and bots are beatable but not brain-dead.
 
-import type { BotPersonality, Drafter, Player, Position } from '../shared/types';
+import type { BotPersonality, Drafter, FreeformPick, Player, Position } from '../shared/types';
 import { SLOTS } from '../shared/types';
 import type { Rng } from './rng';
 import { weightedIndex } from './rng';
@@ -75,4 +75,51 @@ export function botChoose(
 export function randomPersonality(rng: Rng): BotPersonality {
   const bag: BotPersonality[] = ['bpa', 'bpa', 'needs', 'needs', 'defense', 'stars', 'contrarian'];
   return bag[Math.floor(rng() * bag.length)];
+}
+
+/**
+ * Build a full free-form lineup: one pick per empty slot. Honors personality,
+ * with game-theory variance: sometimes takes the obvious star at a slot
+ * (risking a contested elimination), usually spreads picks so the lineup
+ * survives the reveal. May return fewer picks than empty slots when the pool
+ * has no fitting player for a slot (the safety valve resolves that).
+ */
+export function botFreeformLineup(
+  available: Player[],
+  d: Drafter,
+  personality: BotPersonality,
+  rng: Rng,
+): FreeformPick[] {
+  const picks: FreeformPick[] = [];
+  const taken = new Set<string>();
+  const emptyIdx = d.roster
+    .map((s, i) => (s === null ? i : -1))
+    .filter((i) => i >= 0);
+
+  // How likely this bot is to take the obvious best player at a slot.
+  const starHunger =
+    personality === 'stars' ? 0.45 : personality === 'contrarian' ? 0.08 : 0.22;
+
+  for (const slot of emptyIdx) {
+    const pos = SLOTS[slot];
+    const fits = available.filter(
+      (p) => !taken.has(p.id) && (p.pos === pos || p.pos2 === pos),
+    );
+    if (fits.length === 0) break;
+    let choice: Player;
+    if (rng() < starHunger) {
+      // Take the best available at this slot — may collide and get eliminated.
+      choice = fits.reduce((a, b) => (b.ovr > a.ovr ? b : a));
+    } else {
+      const scored = fits
+        .map((p) => ({ p, s: botScore(p, d, personality) + rng() * 6 }))
+        .sort((a, b) => b.s - a.s);
+      const candidates = scored.slice(0, Math.min(8, scored.length));
+      const weights = candidates.map((_, i) => candidates.length - i);
+      choice = candidates[weightedIndex(weights, rng)].p;
+    }
+    taken.add(choice.id);
+    picks.push({ slot, playerId: choice.id });
+  }
+  return picks;
 }

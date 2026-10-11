@@ -59,6 +59,13 @@ export interface FreeformAssignment {
   slot: number;
 }
 
+/** One secret pick within a free-form lineup submission. */
+export interface FreeformPick {
+  /** roster slot index (0=PG..4=C) */
+  slot: number;
+  playerId: string;
+}
+
 export interface FreeformReveal {
   round: number;
   assignments: FreeformAssignment[];
@@ -78,8 +85,8 @@ export interface RoomState {
   currentPick: number;
   // free-form draft
   round: number;
-  /** hidden picks: drafterId -> playerId */
-  submissions: Record<string, string>;
+  /** hidden lineups: drafterId -> one pick per empty slot */
+  submissions: Record<string, FreeformPick[]>;
   lastReveal: FreeformReveal | null;
   roundsStalled: number;
   /** epoch ms when the current pick/round auto-resolves, null when none */
@@ -96,7 +103,7 @@ export type ClientMessage =
   | { t: 'removeDrafter'; drafterId: string }
   | { t: 'start' }
   | { t: 'pick'; playerId: string }
-  | { t: 'submit'; playerId: string };
+  | { t: 'submit'; picks: FreeformPick[] };
 
 /** Messages server -> client */
 export interface ClientRoomView extends RoomState {

@@ -7,7 +7,7 @@ import {
   activeDrafters,
   buildSnakeOrder,
   currentSnakeDrafter,
-  doFreeformSubmit,
+  doFreeformLineupSubmit,
   doSnakePick,
   freeformAllSubmitted,
   freeformNeedsSafetyFill,
@@ -16,7 +16,7 @@ import {
   resolveFreeformRound,
   rosterFull,
 } from '../src/engine/draft';
-import { botChoose } from '../src/engine/bots';
+import { botChoose, botFreeformLineup } from '../src/engine/bots';
 import { rankTeams } from '../src/engine/judge';
 import { mulberry32, shuffled } from '../src/engine/rng';
 
@@ -110,21 +110,42 @@ function validateFinal(s: RoomState, label: string): void {
   const rng = mulberry32(7);
   const s = baseState('freeform', 6, 7);
   let totalEliminated = 0;
+  let totalLocked = 0;
+  const eliminatedEver = new Set<string>();
   let guard = 0;
-  while (s.phase === 'draft' && guard < 40) {
+  while (s.phase === 'draft' && guard < 60) {
     guard++;
     for (const d of activeDrafters(s)) {
-      const choice = botChoose(availablePlayers(s), d, d.personality ?? 'bpa', rng);
-      assert(!!choice, 'freeform: bot found no pick');
-      const err = doFreeformSubmit(s, d.id, choice!.id, byId);
+      const empty = d.roster.filter((x) => x === null).length;
+      const lineup = botFreeformLineup(availablePlayers(s), d, d.personality ?? 'bpa', rng);
+      assert(
+        lineup.length === empty,
+        `freeform: lineup covers ${lineup.length}/${empty} slots for ${d.name}`,
+      );
+      const err = doFreeformLineupSubmit(s, d.id, lineup, byId);
       assert(!err, `freeform submit error: ${err}`);
     }
     assert(freeformAllSubmitted(s), 'freeform: not all submitted');
-    const reveal = resolveFreeformRound(s, byId);
+    const reveal = resolveFreeformRound(s);
     totalEliminated += reveal.eliminations.length;
-    if (freeformNeedsSafetyFill(s)) freeformSafetyFill(s, byId);
+    totalLocked += reveal.assignments.length;
+    for (const id of reveal.eliminations) eliminatedEver.add(id);
+    if (freeformNeedsSafetyFill(s, byId)) freeformSafetyFill(s, byId);
   }
-  validateFinal(s, `free-form draft (${s.round - 1} rounds, ${totalEliminated} eliminations)`);
+  assert(s.phase === 'complete', 'freeform: did not terminate');
+  // Eliminated players must never end up locked in a roster.
+  for (const d of s.drafters) {
+    for (const id of d.roster) {
+      assert(
+        id !== null && !eliminatedEver.has(id!),
+        `freeform: eliminated player ${id} in ${d.name}'s roster`,
+      );
+    }
+  }
+  validateFinal(
+    s,
+    `free-form draft (${s.round - 1} rounds, ${totalLocked} locked, ${totalEliminated} eliminated)`,
+  );
 }
 
 // --- Judge sanity ---

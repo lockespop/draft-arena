@@ -5,17 +5,17 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { customAlphabet } from 'nanoid';
 import playersData from '../data/players.json';
 import type {
-  BotPersonality, ClientMessage, ClientRoomView, Drafter, Player,
+  BotPersonality, ClientMessage, ClientRoomView, Drafter, FreeformPick, Player,
   RoomState, ServerMessage,
 } from '../shared/types';
 import { MAX_DRAFTERS, PICK_SECONDS, SNAKE_ROUNDS } from '../shared/types';
 import {
   activeDrafters, autoPickSnake, buildSnakeOrder,
-  currentSnakeDrafter, doFreeformSubmit, doSnakePick, freeformAllSubmitted,
+  currentSnakeDrafter, doFreeformLineupSubmit, doSnakePick, freeformAllSubmitted,
   freeformNeedsSafetyFill, freeformSafetyFill, playersById, resolveFreeformRound,
   rosterFull,
 } from '../engine/draft';
-import { botChoose, randomBotName, randomPersonality } from '../engine/bots';
+import { botChoose, botFreeformLineup, randomBotName, randomPersonality } from '../engine/bots';
 import { rankTeams } from '../engine/judge';
 import { mulberry32, randomSeed, shuffled } from '../engine/rng';
 import type { Rng } from '../engine/rng';
@@ -67,7 +67,7 @@ function newRoom(mode: RoomState['mode']): RoomState {
 
 function viewFor(room: Room, youId: string | null): ClientRoomView {
   const s = room.state;
-  const submissions: Record<string, string> = {};
+  const submissions: Record<string, FreeformPick[]> = {};
   if (youId && s.submissions[youId]) submissions[youId] = s.submissions[youId];
   return { ...s, submissions, submittedCount: Object.keys(s.submissions).length };
 }
@@ -176,7 +176,7 @@ function nudgeBots(room: Room): void {
   const s = room.state;
   if (s.phase !== 'draft') return;
 
-  if (freeformNeedsSafetyFill(s)) {
+  if (freeformNeedsSafetyFill(s, byId)) {
     freeformSafetyFill(s, byId);
     if (room.state.phase === 'complete') finishDraft(room);
     broadcast(room);
@@ -207,7 +207,7 @@ function nudgeBots(room: Room): void {
     return;
   }
 
-  // freeform: bots submit hidden picks with staggered delays
+  // freeform: bots submit hidden lineups with staggered delays
   const missing = activeDrafters(s).filter(
     (d) => d.isBot && s.submissions[d.id] === undefined,
   );
@@ -217,7 +217,7 @@ function nudgeBots(room: Room): void {
         const st = room.state;
         if (st.phase !== 'draft' || st.mode !== 'freeform') return;
         if (!freeformAllSubmitted(st)) return;
-        resolveFreeformRound(st, byId);
+        resolveFreeformRound(st);
         if (room.state.phase === 'complete') finishDraft(room);
         else armDeadline(room);
         broadcast(room);
@@ -241,8 +241,12 @@ function nudgeBots(room: Room): void {
       nudgeBots(room);
       return;
     }
-    const choice = botChoose(availablePlayers(st), dd, dd.personality ?? 'bpa', room.rng);
-    if (choice) doFreeformSubmit(st, drafterId, choice.id, byId);
+    const lineup = botFreeformLineup(availablePlayers(st), dd, dd.personality ?? 'bpa', room.rng);
+    if (lineup.length > 0) {
+      // Full coverage required; a partial lineup means the pool is too thin
+      // for this bot's slots — the safety valve resolves it on the next nudge.
+      doFreeformLineupSubmit(st, drafterId, lineup, byId);
+    }
     broadcast(room);
     nudgeBots(room);
   });
@@ -262,14 +266,20 @@ function onDeadline(room: Room): void {
     return;
   }
 
-  // freeform: auto-submit for everyone still missing (humans get a BPA-ish pick)
+  // freeform: auto-submit a full lineup for everyone still missing
+  // (humans get a needs-based lineup)
   for (const d of activeDrafters(s)) {
     if (s.submissions[d.id] !== undefined) continue;
-    const choice = botChoose(availablePlayers(s), d, d.personality ?? 'needs', room.rng);
-    if (choice) doFreeformSubmit(s, d.id, choice.id, byId);
+    const lineup = botFreeformLineup(
+      availablePlayers(s),
+      d,
+      d.isBot ? (d.personality ?? 'bpa') : 'needs',
+      room.rng,
+    );
+    if (lineup.length > 0) doFreeformLineupSubmit(s, d.id, lineup, byId);
   }
   if (freeformAllSubmitted(s)) {
-    resolveFreeformRound(s, byId);
+    resolveFreeformRound(s);
   }
   if (room.state.phase === 'complete') finishDraft(room);
   else armDeadline(room);
@@ -381,7 +391,7 @@ function handleMessage(room: Room | undefined, ws: WebSocket, raw: string): void
       }
       if (msg.t === 'submit') {
         if (!youId) return sendError(ws, 'Join the room first.');
-        const err = doFreeformSubmit(s, youId, msg.playerId, byId);
+        const err = doFreeformLineupSubmit(s, youId, msg.picks, byId);
         if (err) return sendError(ws, err);
         room.lastActivity = Date.now();
         broadcast(room);
