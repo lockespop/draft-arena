@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RoomHandle } from '../hooks/useRoom';
 import type { ClientRoomView, FreeformPick } from '../../shared/types';
-import { SLOTS } from '../../shared/types';
+import { FREEFORM_SECONDS, SLOTS } from '../../shared/types';
 import { SORTED_BY_OVR, BY_ID } from '../players';
 import { Card, PlayerPicker, RosterSlots, TimerBar } from '../components/ui';
 
@@ -18,7 +18,7 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
     [me],
   );
 
-  // This round's lineup attempt: slot index -> playerId
+  // This round's lineup attempt: slot index -> playerId (tentative until submitted)
   const [lineup, setLineup] = useState<Record<number, string>>({});
   const [editing, setEditing] = useState(false);
   // New round -> fresh lineup.
@@ -27,14 +27,58 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
     setEditing(false);
   }, [state.round]);
 
-  const myRoster = useMemo(
-    () => (me ? me.roster.map((id) => (id ? BY_ID.get(id) ?? null : null)) : []),
-    [me],
-  );
-
   const submitted: FreeformPick[] | undefined =
     rr.youId ? state.submissions[rr.youId] : undefined;
   const showPickers = !submitted || editing;
+
+  // Sync tentative picks to the server as they're made (debounced), so a
+  // deadline never discards what the user already chose. The server keeps
+  // them secret from other drafters until the reveal. Skips sends when the
+  // picks haven't actually changed (server broadcasts re-render often).
+  const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSentRef = useRef<string>('');
+  useEffect(() => {
+    if (!showPickers || state.phase !== 'draft') return;
+    if (sendTimer.current) clearTimeout(sendTimer.current);
+    sendTimer.current = setTimeout(() => {
+      const picks: FreeformPick[] = emptySlots
+        .filter((slot) => lineup[slot])
+        .map((slot) => ({ slot, playerId: lineup[slot] }));
+      const sig = JSON.stringify(picks);
+      if (sig === lastSentRef.current) return;
+      lastSentRef.current = sig;
+      rr.send({ t: 'lineup_update', picks });
+    }, 300);
+    return () => {
+      if (sendTimer.current) clearTimeout(sendTimer.current);
+    };
+  }, [lineup, showPickers, state.phase, emptySlots, rr]);
+
+  // Roster display: locked picks solid, tentative picks shown immediately
+  // with a "pending" treatment until they're submitted and revealed.
+  const displayRoster = useMemo(() => {
+    const base = me
+      ? me.roster.map((id) => (id ? (BY_ID.get(id) ?? null) : null))
+      : [];
+    const pending = [false, false, false, false, false];
+    for (const [slotStr, pid] of Object.entries(lineup)) {
+      const slot = Number(slotStr);
+      const p = BY_ID.get(pid);
+      if (p && !base[slot]) {
+        base[slot] = p;
+        pending[slot] = true;
+      }
+    }
+    return { base, pending };
+  }, [me, lineup]);
+
+  const clearSlot = (slot: number) => {
+    setLineup((l) => {
+      const n = { ...l };
+      delete n[slot];
+      return n;
+    });
+  };
 
   const chosenIds = useMemo(() => new Set(Object.values(lineup)), [lineup]);
 
@@ -80,12 +124,19 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
             {state.submittedCount}/{activeCount} lineups in
           </span>
         </div>
-        <TimerBar deadline={state.pickDeadline} />
+        <TimerBar
+          deadline={state.pickDeadline}
+          totalSeconds={FREEFORM_SECONDS}
+          big
+          label="Round ends in"
+        />
         <p className="text-xs text-slate-400 mt-2">
-          Build your starting five in secret — one player per open slot. If 2+ drafters
-          pick the same player, that player is{' '}
-          <span className="text-red-400 font-semibold">eliminated</span> — nobody gets
-          them. Unique picks lock into your roster. Fill your five and you sit out.
+          Build your starting five in secret — one player per open slot. Your picks
+          appear on your roster right away and save as you tap, so the buzzer
+          never wipes them out. If 2+ drafters pick the same player, that player
+          is <span className="text-red-400 font-semibold">eliminated</span> —
+          nobody gets them. Unique picks lock into your roster. Fill your five
+          and you sit out.
         </p>
       </Card>
 
@@ -118,7 +169,7 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
             </div>
           )}
           {reveal.eliminations.length > 0 && (
-            <div className="text-sm text-red-300">
+            <div className="text-sm text-red-300 mb-1.5">
               <span className="font-bold">🔥 Eliminated from the pool:</span>{' '}
               {reveal.eliminations
                 .map((id) => BY_ID.get(id)?.name ?? id)
@@ -126,8 +177,34 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
             </div>
           )}
           {reveal.assignments.length === 0 && reveal.eliminations.length === 0 && (
-            <div className="text-sm text-slate-400">No picks went through that round.</div>
+            <div className="text-sm text-slate-400 mb-1.5">No picks went through that round.</div>
           )}
+          <div className="pt-2 border-t border-slate-800">
+            <div className="text-xs font-bold uppercase tracking-wide text-slate-400 mb-1.5">
+              League progress
+            </div>
+            {state.drafters.map((d) => (
+              <div key={d.id} className="mb-1.5">
+                <div
+                  className={`text-xs font-semibold ${d.id === rr.youId ? 'text-orange-300' : 'text-slate-300'}`}
+                >
+                  {d.id === rr.youId ? `${d.name} (you)` : d.name}
+                </div>
+                <div className="text-xs text-slate-500 leading-relaxed">
+                  {SLOTS.map((pos, i) => {
+                    const pid = d.roster[i];
+                    const nm = pid ? (BY_ID.get(pid)?.name ?? '?') : '—';
+                    return (
+                      <span key={pos}>
+                        <span className="text-slate-600">{pos}:</span> {nm}
+                        {i < SLOTS.length - 1 ? ' · ' : ''}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
 
@@ -135,7 +212,14 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
         <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5">
           Your starting five
         </div>
-        <RosterSlots roster={myRoster} />
+        <RosterSlots
+          roster={displayRoster.base}
+          pending={displayRoster.pending}
+          onClearSlot={showPickers ? clearSlot : undefined}
+        />
+        <div className="text-[11px] text-slate-500 mt-1">
+          Tap a pending pick to change it before you submit.
+        </div>
       </div>
 
       {!showPickers && submitted ? (
@@ -173,23 +257,19 @@ export function FreeformDraft({ rr, state }: { rr: RoomHandle; state: ClientRoom
               </div>
               <PlayerPicker
                 players={availableForSlot(slot)}
-                draftLabel="Select"
+                draftLabel="Draft"
                 onDraft={(p) => setLineup((l) => ({ ...l, [slot]: p.id }))}
               />
             </div>
           ))}
-          <button
-            onClick={submit}
-            disabled={!complete}
-            className={`w-full min-h-[52px] rounded-xl font-bold text-base transition ${
-              complete
-                ? 'bg-orange-500 text-slate-950 active:bg-orange-400'
-                : 'bg-slate-800 text-slate-500'
-            }`}
-          >
-            {editing ? 'Update lineup' : 'Submit secret lineup'} ({filledCount}/
-            {emptySlots.length})
-          </button>
+          {complete && (
+            <button
+              onClick={submit}
+              className="w-full min-h-[52px] rounded-xl font-bold text-base transition bg-orange-500 text-slate-950 active:bg-orange-400"
+            >
+              {editing ? 'Update lineup' : 'Submit lineup'}
+            </button>
+          )}
         </>
       )}
     </div>

@@ -8,10 +8,11 @@ import type {
   BotPersonality, ClientMessage, ClientRoomView, Drafter, FreeformPick, Player,
   RoomState, ServerMessage,
 } from '../shared/types';
-import { MAX_DRAFTERS, PICK_SECONDS, SNAKE_ROUNDS } from '../shared/types';
+import { MAX_DRAFTERS, PICK_SECONDS, FREEFORM_SECONDS, SNAKE_ROUNDS } from '../shared/types';
 import {
   activeDrafters, autoPickSnake, buildSnakeOrder,
-  currentSnakeDrafter, doFreeformLineupSubmit, doSnakePick, freeformAllSubmitted,
+  currentSnakeDrafter, doFreeformLineupSubmit, doFreeformLineupUpdate, doSnakePick,
+  finalizeTentativeLineup, freeformAllSubmitted,
   freeformNeedsSafetyFill, freeformSafetyFill, playersById, resolveFreeformRound,
   rosterFull,
 } from '../engine/draft';
@@ -29,6 +30,8 @@ const PORT = Number(process.env.PORT || 3001);
 const BOT_DELAY_MIN = Number(process.env.BOT_DELAY_MIN || 1200);
 const BOT_DELAY_MAX = Number(process.env.BOT_DELAY_MAX || 2800);
 const PICK_SECS = Number(process.env.PICK_SECONDS || PICK_SECONDS);
+/** Free-form rounds get a longer deadline (picking up to 5 players takes longer). */
+const FREEFORM_SECS = Number(process.env.FREEFORM_SECONDS || FREEFORM_SECONDS);
 
 interface Room {
   state: RoomState;
@@ -57,6 +60,7 @@ function newRoom(mode: RoomState['mode']): RoomState {
     currentPick: 0,
     round: 1,
     submissions: {},
+    tentative: {},
     lastReveal: null,
     roundsStalled: 0,
     pickDeadline: null,
@@ -67,9 +71,13 @@ function newRoom(mode: RoomState['mode']): RoomState {
 
 function viewFor(room: Room, youId: string | null): ClientRoomView {
   const s = room.state;
+  // Hidden info is only ever visible to its owner: your own submission and
+  // your own tentative picks. Everyone else's stay secret until the reveal.
   const submissions: Record<string, FreeformPick[]> = {};
   if (youId && s.submissions[youId]) submissions[youId] = s.submissions[youId];
-  return { ...s, submissions, submittedCount: Object.keys(s.submissions).length };
+  const tentative: Record<string, FreeformPick[]> = {};
+  if (youId && s.tentative[youId]) tentative[youId] = s.tentative[youId];
+  return { ...s, submissions, tentative, submittedCount: Object.keys(s.submissions).length };
 }
 
 function broadcast(room: Room): void {
@@ -112,12 +120,14 @@ function armDeadline(room: Room): void {
   const s = room.state;
   clearDeadline(room);
   if (s.phase !== 'draft') return;
-  s.pickDeadline = Date.now() + PICK_SECS * 1000;
+  // Free-form rounds get a longer clock: up to 5 picks per round.
+  const secs = s.mode === 'freeform' ? FREEFORM_SECS : PICK_SECS;
+  s.pickDeadline = Date.now() + secs * 1000;
   room.lastActivity = Date.now();
   room.deadline = setTimeout(() => {
     room.deadline = null;
     onDeadline(room);
-  }, PICK_SECS * 1000);
+  }, secs * 1000);
 }
 
 function botDelay(rng: Rng): number {
@@ -147,6 +157,7 @@ function startDraft(room: Room): string | null {
   s.phase = 'draft';
   s.round = 1;
   s.submissions = {};
+  s.tentative = {};
   s.lastReveal = null;
   s.roundsStalled = 0;
   s.winnerId = null;
@@ -266,17 +277,23 @@ function onDeadline(room: Room): void {
     return;
   }
 
-  // freeform: auto-submit a full lineup for everyone still missing
-  // (humans get a needs-based lineup)
+  // freeform: finalize tentative picks for everyone still missing.
+  // Humans keep the picks they already made; only the still-empty slots get
+  // auto-filled needs-based. Bots submit a full lineup as before.
   for (const d of activeDrafters(s)) {
     if (s.submissions[d.id] !== undefined) continue;
-    const lineup = botFreeformLineup(
-      availablePlayers(s),
-      d,
-      d.isBot ? (d.personality ?? 'bpa') : 'needs',
-      room.rng,
-    );
-    if (lineup.length > 0) doFreeformLineupSubmit(s, d.id, lineup, byId);
+    if (d.isBot) {
+      const lineup = botFreeformLineup(
+        availablePlayers(s),
+        d,
+        d.personality ?? 'bpa',
+        room.rng,
+      );
+      if (lineup.length > 0) doFreeformLineupSubmit(s, d.id, lineup, byId);
+    } else {
+      // Ignore errors here: the safety valve resolves deadlocks on the next nudge.
+      finalizeTentativeLineup(s, d.id, byId, room.rng);
+    }
   }
   if (freeformAllSubmitted(s)) {
     resolveFreeformRound(s);
@@ -393,9 +410,19 @@ function handleMessage(room: Room | undefined, ws: WebSocket, raw: string): void
         if (!youId) return sendError(ws, 'Join the room first.');
         const err = doFreeformLineupSubmit(s, youId, msg.picks, byId);
         if (err) return sendError(ws, err);
+        delete s.tentative[youId];
         room.lastActivity = Date.now();
         broadcast(room);
         nudgeBots(room);
+        break;
+      }
+      if (msg.t === 'lineup_update') {
+        if (!youId) return sendError(ws, 'Join the room first.');
+        if (s.mode !== 'freeform') return sendError(ws, 'Not a free-for-all draft.');
+        const err = doFreeformLineupUpdate(s, youId, msg.picks, byId);
+        if (err) return sendError(ws, err);
+        room.lastActivity = Date.now();
+        broadcast(room);
         break;
       }
     }

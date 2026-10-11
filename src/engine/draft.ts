@@ -141,24 +141,127 @@ export function doFreeformLineupSubmit(
   const seenSlots = new Set<number>();
   const seenPlayers = new Set<string>();
   for (const pick of picks) {
-    if (!pick || !Number.isInteger(pick.slot) || pick.slot < 0 || pick.slot >= SLOTS.length) {
-      return 'Invalid slot.';
-    }
-    if (d.roster[pick.slot] !== null) return 'That slot is already filled.';
-    if (seenSlots.has(pick.slot)) return 'Two picks for the same slot.';
-    seenSlots.add(pick.slot);
-    if (seenPlayers.has(pick.playerId)) return 'Two slots picked the same player.';
-    seenPlayers.add(pick.playerId);
-    if (!state.pool.includes(pick.playerId)) return 'Player is not available.';
-    const player = byId.get(pick.playerId);
-    if (!player) return 'Unknown player.';
-    const pos = SLOTS[pick.slot];
-    if (player.pos !== pos && player.pos2 !== pos) {
-      return `${player.name} can't play ${pos}.`;
-    }
+    const err = validateFreeformPick(state, d, pick, byId, seenSlots, seenPlayers);
+    if (err) return err;
   }
   state.submissions[drafterId] = picks;
   return null;
+}
+
+/**
+ * Validate one free-form pick (shared by submit + tentative update).
+ * Tracks seen slots/players in the caller's sets so duplicates across the
+ * pick list are caught.
+ */
+function validateFreeformPick(
+  state: RoomState,
+  d: Drafter,
+  pick: FreeformPick,
+  byId: Map<string, Player>,
+  seenSlots: Set<number>,
+  seenPlayers: Set<string>,
+): string | null {
+  if (!pick || !Number.isInteger(pick.slot) || pick.slot < 0 || pick.slot >= SLOTS.length) {
+    return 'Invalid slot.';
+  }
+  if (d.roster[pick.slot] !== null) return 'That slot is already filled.';
+  if (seenSlots.has(pick.slot)) return 'Two picks for the same slot.';
+  if (seenPlayers.has(pick.playerId)) return 'Two slots picked the same player.';
+  if (!state.pool.includes(pick.playerId)) return 'Player is not available.';
+  const player = byId.get(pick.playerId);
+  if (!player) return 'Unknown player.';
+  const pos = SLOTS[pick.slot];
+  if (player.pos !== pos && player.pos2 !== pos) {
+    return `${player.name} can't play ${pos}.`;
+  }
+  seenSlots.add(pick.slot);
+  seenPlayers.add(pick.playerId);
+  return null;
+}
+
+/**
+ * Store a drafter's tentative (unfinalized) free-form picks, synced live as
+ * they tap. Partial coverage is allowed — picks are validated the same way
+ * as a final submission. Kept in state.tentative, never broadcast to others.
+ */
+export function doFreeformLineupUpdate(
+  state: RoomState,
+  drafterId: string,
+  picks: FreeformPick[],
+  byId: Map<string, Player>,
+): string | null {
+  const d = drafterById(state, drafterId);
+  if (!d) return 'Drafter not found.';
+  if (state.phase !== 'draft' || state.mode !== 'freeform') return 'Draft is not running.';
+  if (rosterFull(d)) return 'Your roster is full.';
+  if (!Array.isArray(picks)) return 'Bad picks.';
+  const emptyCount = d.roster.filter((s) => s === null).length;
+  if (picks.length > emptyCount) return 'Too many picks.';
+  const seenSlots = new Set<number>();
+  const seenPlayers = new Set<string>();
+  for (const pick of picks) {
+    const err = validateFreeformPick(state, d, pick, byId, seenSlots, seenPlayers);
+    if (err) return err;
+  }
+  state.tentative[drafterId] = picks;
+  return null;
+}
+
+/**
+ * Deadline finalize for a drafter who never submitted: re-validate their
+ * tentative picks (dropping any that no longer fit), keep the valid ones,
+ * and auto-fill ONLY the remaining empty slots needs-based (best overall
+ * rating that fits the slot). Stores a full submission. Returns null on
+ * success, or an error message (caller falls back to the safety valve).
+ */
+export function finalizeTentativeLineup(
+  state: RoomState,
+  drafterId: string,
+  byId: Map<string, Player>,
+  rng: Rng,
+): string | null {
+  const d = drafterById(state, drafterId);
+  if (!d) return 'Drafter not found.';
+  if (state.phase !== 'draft' || state.mode !== 'freeform') return 'Draft is not running.';
+  if (rosterFull(d)) {
+    delete state.tentative[drafterId];
+    return null;
+  }
+  // Re-validate tentative picks one by one, keeping whatever still fits.
+  const valid: FreeformPick[] = [];
+  const seenSlots = new Set<number>();
+  const seenPlayers = new Set<string>();
+  for (const pick of state.tentative[drafterId] ?? []) {
+    if (!validateFreeformPick(state, d, pick, byId, seenSlots, seenPlayers)) {
+      valid.push(pick);
+    }
+  }
+  // Auto-fill only the slots still empty, needs-based.
+  const pool = state.pool;
+  for (let slot = 0; slot < SLOTS.length; slot++) {
+    if (d.roster[slot] !== null || seenSlots.has(slot)) continue;
+    const pos = SLOTS[slot];
+    let best: Player | null = null;
+    let bestScore = -Infinity;
+    for (const id of pool) {
+      if (seenPlayers.has(id)) continue;
+      const p = byId.get(id);
+      if (!p) continue;
+      if (p.pos !== pos && p.pos2 !== pos) continue;
+      const score = p.ovr + rng() * 3;
+      if (score > bestScore) {
+        bestScore = score;
+        best = p;
+      }
+    }
+    if (best) {
+      valid.push({ slot, playerId: best.id });
+      seenSlots.add(slot);
+      seenPlayers.add(best.id);
+    }
+  }
+  delete state.tentative[drafterId];
+  return doFreeformLineupSubmit(state, drafterId, valid, byId);
 }
 
 export function freeformAllSubmitted(state: RoomState): boolean {
@@ -210,6 +313,7 @@ export function resolveFreeformRound(state: RoomState): FreeformReveal {
 
   state.lastReveal = reveal;
   state.submissions = {};
+  state.tentative = {};
   state.round += 1;
   if (reveal.assignments.length === 0) state.roundsStalled += 1;
   else state.roundsStalled = 0;

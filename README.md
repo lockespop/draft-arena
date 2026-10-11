@@ -9,11 +9,17 @@ Two modes:
   60-second pick timer with auto-pick on timeout.
 - **⚡ Free-for-All** — every round, each drafter still building secretly submits a
   full lineup: one player per open roster slot (up to 5 in round 1), each pick
-  assigned to its position. At the reveal, any player picked by 2+ drafters is
-  **eliminated** from the pool entirely — nobody gets them. Players picked by
-  exactly one drafter **lock in** at their position and come off the board.
-  Drafters with a full starting five sit out; rounds continue until every team
-  is full. Land 5 unique picks in round 1 and you're done immediately.
+  assigned to its position. Rounds run on a 3-minute clock with a prominent
+  countdown. Your picks appear on your roster immediately (marked pending) and
+  sync to the server live as you tap — if the buzzer hits before you submit,
+  your picks are kept and only the still-empty slots are auto-filled
+  needs-based, never replaced wholesale. At the reveal, any player picked by
+  2+ drafters is **eliminated** from the pool entirely — nobody gets them.
+  Players picked by exactly one drafter **lock in** at their position and come
+  off the board. The reveal screen shows every team's full locked roster
+  ("League progress") plus that round's eliminations. Drafters with a full
+  starting five sit out; rounds continue until every team is full. Land 5
+  unique picks in round 1 and you're done immediately.
 
 Any mix of humans and computer opponents (5 bot personalities: Best Available,
 Positional Needs, Defense First, Star Chaser, Contrarian). Solo vs bots works.

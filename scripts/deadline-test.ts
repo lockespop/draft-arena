@@ -1,6 +1,10 @@
 import { WebSocket } from 'ws';
 
 // AFK test: human NEVER picks/submits. The server deadline must auto-resolve.
+// NOTE: free-form rounds default to a 180s deadline, so run the server with
+// FREEFORM_SECONDS=10 for a quick check:
+//   FREEFORM_SECONDS=10 npm run dev:server
+//   npx tsx scripts/deadline-test.ts [snake|freeform]
 const mode = process.argv[2] === 'snake' ? 'snake' : 'freeform';
 const ws = new WebSocket('ws://localhost:3001');
 let joined = false;

@@ -8,7 +8,9 @@ import {
   buildSnakeOrder,
   currentSnakeDrafter,
   doFreeformLineupSubmit,
+  doFreeformLineupUpdate,
   doSnakePick,
+  finalizeTentativeLineup,
   freeformAllSubmitted,
   freeformNeedsSafetyFill,
   freeformSafetyFill,
@@ -49,6 +51,7 @@ function baseState(mode: 'snake' | 'freeform', n: number, seed: number): RoomSta
     currentPick: 0,
     round: 1,
     submissions: {},
+    tentative: {},
     lastReveal: null,
     roundsStalled: 0,
     pickDeadline: null,
@@ -146,6 +149,42 @@ function validateFinal(s: RoomState, label: string): void {
     s,
     `free-form draft (${s.round - 1} rounds, ${totalLocked} locked, ${totalEliminated} eliminated)`,
   );
+}
+
+// --- Free-form tentative finalize (deadline path) ---
+// A human taps 2 picks then goes AFK: the deadline must finalize their
+// tentative picks and auto-fill ONLY the remaining slots — never discard
+// what they chose.
+{
+  const rng = mulberry32(21);
+  const s = baseState('freeform', 2, 21);
+  const human = s.drafters[0];
+  const avail = availablePlayers(s);
+  const pg = avail.find((p) => p.pos === 'PG')!;
+  const sg = avail.find((p) => p.pos === 'SG' && p.id !== pg.id)!;
+  let err = doFreeformLineupUpdate(
+    s,
+    human.id,
+    [
+      { slot: 0, playerId: pg.id },
+      { slot: 1, playerId: sg.id },
+    ],
+    byId,
+  );
+  assert(!err, `tentative update error: ${err}`);
+  assert(s.submissions[human.id] === undefined, 'tentative update must not create a submission');
+  assert((s.tentative[human.id] ?? []).length === 2, 'tentative picks stored');
+  err = finalizeTentativeLineup(s, human.id, byId, rng);
+  assert(!err, `finalize error: ${err}`);
+  const sub = s.submissions[human.id];
+  assert(!!sub && sub.length === 5, 'finalize must cover all 5 slots');
+  const ids = sub.map((p) => p.playerId);
+  assert(ids.includes(pg.id) && ids.includes(sg.id), 'tentative picks must be preserved');
+  const slots = sub.map((p) => p.slot).sort();
+  assert(JSON.stringify(slots) === '[0,1,2,3,4]', 'one pick per slot');
+  // Other drafter unaffected.
+  assert(s.submissions[s.drafters[1].id] === undefined, 'other drafter untouched');
+  console.log('✅ free-form tentative finalize: human picks preserved, empty slots auto-filled');
 }
 
 // --- Judge sanity ---

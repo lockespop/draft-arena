@@ -87,6 +87,9 @@ export interface RoomState {
   round: number;
   /** hidden lineups: drafterId -> one pick per empty slot */
   submissions: Record<string, FreeformPick[]>;
+  /** tentative (unfinalized) picks, synced live as humans tap: drafterId -> picks.
+   *  Kept secret from other clients until the reveal; finalized at deadline. */
+  tentative: Record<string, FreeformPick[]>;
   lastReveal: FreeformReveal | null;
   roundsStalled: number;
   /** epoch ms when the current pick/round auto-resolves, null when none */
@@ -103,7 +106,8 @@ export type ClientMessage =
   | { t: 'removeDrafter'; drafterId: string }
   | { t: 'start' }
   | { t: 'pick'; playerId: string }
-  | { t: 'submit'; picks: FreeformPick[] };
+  | { t: 'submit'; picks: FreeformPick[] }
+  | { t: 'lineup_update'; picks: FreeformPick[] };
 
 /** Messages server -> client */
 export interface ClientRoomView extends RoomState {
@@ -117,6 +121,8 @@ export type ServerMessage =
 
 export const SNAKE_ROUNDS = 5;
 export const PICK_SECONDS = 60;
+/** Free-form rounds get a longer deadline: picking up to 5 players takes longer. */
+export const FREEFORM_SECONDS = 180;
 /** Free-form safety valve: after this many rounds, auto-fill incomplete rosters */
 export const MAX_FREEFORM_ROUNDS = 15;
 export const MIN_DRAFTERS = 1;

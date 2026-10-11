@@ -70,22 +70,47 @@ export function OvrBadge({ ovr }: { ovr: number }) {
 // Roster slots
 // ---------------------------------------------------------------------------
 
-export function RosterSlots({ roster }: { roster: (Player | null)[] }) {
+export function RosterSlots({
+  roster,
+  pending,
+  onClearSlot,
+}: {
+  roster: (Player | null)[];
+  /** slot indexes whose pick is tentative (chosen but not yet finalized) */
+  pending?: boolean[];
+  /** tapping a pending slot clears it (lets the user change their mind) */
+  onClearSlot?: (slot: number) => void;
+}) {
   return (
     <div className="flex flex-col gap-1.5">
       {SLOTS.map((pos, i) => {
         const p = roster[i] ?? null;
+        const isPending = !!pending?.[i] && !!p;
         return (
           <div
             key={pos}
+            onClick={isPending && onClearSlot ? () => onClearSlot(i) : undefined}
             className={`flex items-center gap-3 px-3 py-2 rounded-xl border ${
-              p ? 'bg-slate-800/80 border-slate-700' : 'bg-slate-900/60 border-slate-800 border-dashed'
+              isPending
+                ? 'bg-orange-500/5 border-orange-400/60 border-dashed cursor-pointer active:bg-orange-500/10'
+                : p
+                  ? 'bg-slate-800/80 border-slate-700'
+                  : 'bg-slate-900/60 border-slate-800 border-dashed'
             }`}
           >
             <span className="w-8 text-xs font-bold text-slate-400">{pos}</span>
             {p ? (
               <>
-                <span className="flex-1 text-sm font-medium truncate">{p.name}</span>
+                <span
+                  className={`flex-1 text-sm font-medium truncate ${isPending ? 'text-slate-300' : ''}`}
+                >
+                  {p.name}
+                </span>
+                {isPending && (
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-orange-300/90">
+                    pending
+                  </span>
+                )}
                 <OvrBadge ovr={p.ovr} />
               </>
             ) : (
@@ -102,7 +127,19 @@ export function RosterSlots({ roster }: { roster: (Player | null)[] }) {
 // Pick timer
 // ---------------------------------------------------------------------------
 
-export function TimerBar({ deadline }: { deadline: number | null }) {
+export function TimerBar({
+  deadline,
+  totalSeconds = PICK_SECONDS,
+  big = false,
+  label = 'Time to pick',
+}: {
+  deadline: number | null;
+  /** full length of the countdown, for the progress bar math */
+  totalSeconds?: number;
+  /** prominent rendering for long free-form rounds */
+  big?: boolean;
+  label?: string;
+}) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -113,19 +150,26 @@ export function TimerBar({ deadline }: { deadline: number | null }) {
 
   if (!deadline) return null;
   const left = Math.max(0, deadline - now);
-  const pct = Math.min(100, (left / (PICK_SECONDS * 1000)) * 100);
+  const pct = Math.min(100, (left / (totalSeconds * 1000)) * 100);
   const secs = Math.ceil(left / 1000);
-  const urgent = secs <= 10;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  const clock = mins > 0 ? `${mins}:${String(rem).padStart(2, '0')}` : `${secs}s`;
+  const urgent = secs <= 15;
 
   return (
     <div className="w-full">
-      <div className="flex justify-between text-xs mb-1">
-        <span className="text-slate-400">Time to pick</span>
-        <span className={`font-bold ${urgent ? 'text-red-400' : 'text-slate-200'}`}>
-          {secs}s
+      <div className="flex justify-between items-baseline text-xs mb-1">
+        <span className="text-slate-400">{label}</span>
+        <span
+          className={`font-extrabold tabular-nums ${big ? 'text-2xl' : ''} ${
+            urgent ? 'text-red-400' : 'text-slate-100'
+          }`}
+        >
+          {clock}
         </span>
       </div>
-      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+      <div className={`${big ? 'h-3' : 'h-2'} rounded-full bg-slate-800 overflow-hidden`}>
         <div
           className={`h-full rounded-full transition-all ${urgent ? 'bg-red-500' : 'bg-orange-500'}`}
           style={{ width: `${pct}%` }}
